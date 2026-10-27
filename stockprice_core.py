@@ -449,9 +449,38 @@ def calculate(inp):
 # ============================================================
 # Excel 出力（テンプレート StockPrice.xlsx に書き込み）
 # ============================================================
-def build_excel(inp, r, template_path=TEMPLATE_PATH):
-    wb = px.load_workbook(template_path)
+def find_template(template_path=TEMPLATE_PATH):
+    """テンプレートを探す（Linux のサーバーでは大文字・小文字が区別されるので、名前の違いも許す）。無ければ None"""
+    if os.path.exists(template_path):
+        return template_path
+    folder = os.path.dirname(template_path)
+    for name in os.listdir(folder):
+        if name.lower() == os.path.basename(template_path).lower():
+            return os.path.join(folder, name)
+    return None
+
+
+def _blank_template():
+    """テンプレートが無いときの代わり：同じセル位置に見出しと値だけを書いたシート"""
+    wb = px.Workbook()
     ws = wb.active
+    ws.title = "コード"
+    for cell, text in {"B2": "資産価値", "B4": "事業価値", "B6": "理論株価", "B8": "株価", "B10": "上昇余地",
+                       "B12": "PSR", "B14": "時価総額/正味価値", "F4": ROE_ASSUMED_PER}.items():
+        ws[cell] = text
+    return wb
+
+
+def build_excel(inp, r, template_path=TEMPLATE_PATH):
+    path = find_template(template_path)
+    wb = px.load_workbook(path) if path else _blank_template()
+    ws = wb.active
+    if path is None:
+        # 数式を持つテンプレートが無いので、計算結果をそのまま書く
+        ws["C10"] = r.upside_pct / 100 if r.upside_pct is not None else None
+        ws["C10"].number_format = "0.0%"
+        ws["C12"] = r.psr
+        ws["C14"] = r.mc_to_net_value
 
     ws["A1"] = inp.company or inp.code
     ws["D2"] = inp.bps
