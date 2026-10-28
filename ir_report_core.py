@@ -324,22 +324,22 @@ def load_report(code=None, pl_data=None, with_prices=True):
 
 
 # ============================================================
-# 投資判断の助言（理論株価 × 成長性 × PER 水準）
+# 評価の目安（理論株価 × 成長性 × PER 水準）。売買の推奨ではなく、指標の読み方を示す
 # ============================================================
-def combined_advice(theory_upside_pct, rep, upside_threshold=30):
-    """理論株価の上昇余地、成長性、過去 PER との比較からコメントを組み立てる。
+def combined_advice(theory_gap_pct, rep, threshold=30):
+    """株価の理論株価からの乖離（株価 ÷ 理論株価 − 1, %）、成長性、過去 PER との比較からコメントを組み立てる。
     戻り値: (総合評価ラベル, 理由のリスト)"""
     reasons, score, n = [], 0, 0
-    if theory_upside_pct is not None:
+    if theory_gap_pct is not None:
         n += 1
-        if theory_upside_pct >= upside_threshold:
+        if theory_gap_pct <= -threshold:
             score += 1
-            reasons.append(f"理論株価に対して上昇余地 {theory_upside_pct:.1f}% と十分に割安です（基準 {upside_threshold}%）。")
-        elif theory_upside_pct >= 0:
-            reasons.append(f"理論株価は現在値を上回るものの、上昇余地 {theory_upside_pct:.1f}% は基準 {upside_threshold}% に届きません。")
-        else:
+            reasons.append(f"株価は理論株価（残余利益モデル）を {-theory_gap_pct:.1f}% 下回っており、割安圏です（目安 {threshold}%）。")
+        elif theory_gap_pct >= threshold:
             score -= 1
-            reasons.append(f"現在の株価は理論株価を {-theory_upside_pct:.1f}% 上回っており、資産・事業価値から見ると割高です。")
+            reasons.append(f"株価は理論株価（残余利益モデル）を {theory_gap_pct:.1f}% 上回っており、割高圏です（目安 {threshold}%）。")
+        else:
+            reasons.append(f"株価と理論株価（残余利益モデル）の差は {theory_gap_pct:+.1f}% で、概ね理論株価の範囲内です。")
     if rep is not None and rep.growth_label not in ("", "判定不可"):
         n += 1
         g = f"直近3期平均で増収率 {rep.avg_sales_growth_3y:.1f}%・増益率 {rep.avg_op_growth_3y:.1f}% の「{rep.growth_label}」です。"
@@ -347,7 +347,7 @@ def combined_advice(theory_upside_pct, rep, upside_threshold=30):
             score += 1
         elif rep.growth_label == "業績悪化":
             score -= 1
-            g += " 理論株価の前提となる利益が今後も続くかに注意が必要です。"
+            g += " 理論株価の前提となる ROE が今後も維持できるかに注意が必要です。"
         reasons.append(g)
     if rep is not None and rep.per_upside_pct is not None:
         n += 1
@@ -367,15 +367,15 @@ def combined_advice(theory_upside_pct, rep, upside_threshold=30):
     if n == 0:
         return "判断保留", ["必要なデータが不足しているため、総合評価はできません。"]
     if score >= 2:
-        label = "割安・買い検討"
+        label = "割安（複数の指標が一致）"
     elif score >= 1:
-        label = "やや割安・押し目待ち"
+        label = "やや割安"
     elif score <= -2:
-        label = "割高・見送り"
+        label = "割高（複数の指標が一致）"
     elif score <= -1:
-        label = "やや割高・様子見"
+        label = "やや割高"
     else:
-        label = "適正水準・様子見"
+        label = "中立（明確な割安・割高のサインなし）"
     return label, reasons
 
 
@@ -490,7 +490,7 @@ def build_ir_excel(rep):
 
 
 def add_ir_sheet_to_workbook(xlsx_bytes, rep):
-    """理論株価の Excel（テンプレート）に IR レポートのシートを追加したバイト列を返す"""
+    """理論株価の Excel に IR レポートのシートを追加したバイト列を返す"""
     wb = px.load_workbook(io.BytesIO(xlsx_bytes))
     write_ir_sheet(wb.create_sheet("IRレポート"), rep)
     wb.calculation.fullCalcOnLoad = True

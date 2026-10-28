@@ -21,9 +21,32 @@ NUM_FMT = "localized" if ST_VER >= (1, 46) else "%d"
 st.set_page_config(page_title="理論株価・IRレポート", page_icon="📈", layout="wide")
 
 st.title("📈 理論株価・IR レポート")
-st.caption("銘柄コードを入れるだけで、理論株価（資産価値＋事業価値）と業績の成長性・過去の PER 水準を並べて、割安か割高かを判断する材料をそろえます。")
+st.caption("銘柄コードを入れるだけで、理論株価（残余利益モデル）と業績の成長性・過去の PER 水準を並べて、割安か割高かを判断する材料をそろえます。")
+st.caption(f"⚠️ {core.DISCLAIMER}")
 
-for k, v in {"inputs": None, "report": None, "messages": [], "price": 0.0, "ca": 0.0, "theory_error": None}.items():
+EXAMPLE_PRICE = core.residual_income_value(1000, 0.12)[0]
+with st.expander("💡 理論株価の考え方（かんたん解説）", expanded=True):
+    st.markdown(f"""
+理論株価は **「会社が今持っている財産」＋「これから稼ぐ“もうけの上乗せ分”」** で計算します（残余利益モデル）。
+
+1. **今持っている財産**：1 株あたりの純資産（BPS）。会社を今たたんだら株主に残るお金の目安です。
+2. **もうけの上乗せ分**：株主は預けたお金に年 **{core.COST_OF_EQUITY * 100:.0f}%** くらいの利回りを期待しています（株主資本コスト）。
+   会社がそれ **以上** に稼げば超えた分だけ価値が上乗せされ、届かなければ差し引かれます。
+3. **控えめに見積もる**：高いもうけはライバルとの競争でだんだん薄れるものとして、**{core.FADE_YEARS} 年**かけて上乗せ分が 0 になると仮定し、
+   将来のお金は今の価値に割り引いて合計します。
+
+**例**：純資産 1,000 円・利益率（ROE）12% の会社は、期待の {core.COST_OF_EQUITY * 100:.0f}% を上回る分として 1 年目に約 40 円を上乗せで稼ぎます。
+この上乗せが少しずつ小さくなりながら続くと考え、今の価値に直して合計すると約 {EXAMPLE_PRICE - 1000:,.0f} 円。
+純資産と足した **約 {EXAMPLE_PRICE:,.0f} 円** が理論株価です。
+
+株価が理論株価より **{core.UPSIDE_THRESHOLD}% 以上安ければ「割安圏」、{core.UPSIDE_THRESHOLD}% 以上高ければ「割高圏」** と表示します。
+前提（{core.COST_OF_EQUITY * 100:.0f}% や {core.FADE_YEARS} 年）は「理論株価」タブで変えられ、結果にどのくらいの幅があるかも確認できます。
+""")
+
+DEFAULTS = {"inputs": None, "report": None, "messages": [], "price": 0.0, "ca": 0.0, "theory_error": None,
+            "coe": core.COST_OF_EQUITY * 100, "years": core.FADE_YEARS, "payout": core.DEFAULT_PAYOUT * 100,
+            "roe_basis": core.ROE_BASIS_FORECAST}
+for k, v in DEFAULTS.items():
     st.session_state.setdefault(k, v)
 
 
@@ -69,6 +92,7 @@ def load(code=None, bs_file=None, pl_file=None):
         inputs=inp, report=rep, messages=msgs, theory_error=theory_error,
         price=float((inp.stock_price if inp else None) or (rep.current_price if rep else None) or 0.0),
         ca=float((inp.current_assets_million if inp else None) or 0.0),
+        payout=float((inp.payout_ratio if inp and inp.payout_ratio is not None else core.DEFAULT_PAYOUT) * 100),
     )
 
 
@@ -115,18 +139,15 @@ r = None
 if inp is not None:
     inp.stock_price = price
     inp.current_assets_million = st.session_state.ca or None
-    r = core.calculate(inp)
+    r = core.calculate(inp, coe=st.session_state.coe / 100, years=st.session_state.years,
+                       payout=st.session_state.payout / 100, roe_basis=st.session_state.roe_basis)
 if rep is not None:
     ir.set_current_price(rep, price)
-label, reasons = ir.combined_advice(r.upside_pct if r else None, rep, core.UPSIDE_THRESHOLD)
+label, reasons = ir.combined_advice(r.gap_pct if r else None, rep, core.UPSIDE_THRESHOLD)
 
 
 def fmt(v, spec, suffix=""):
     return "-" if v is None else f"{v:{spec}}{suffix}"
-
-
-def judge(ok):
-    return "-" if ok is None else ("OK" if ok else "NG")
 
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -147,13 +168,13 @@ k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("現在の株価", fmt(price, ",.0f", " 円"))
 k2.metric("理論株価", fmt(r.theoretical_price if r else None, ",.0f", " 円"),
           delta=fmt(r.upside_pct, "+.1f", "%") if r and r.upside_pct is not None else None,
-          help="資産価値＋事業価値。下の数字は現在の株価に対する上昇余地")
+          help="残余利益モデル（BPS ＋ 資本コストを超える利益の現在価値）。下の数字は理論株価が現在の株価をどれだけ上回るか")
 k3.metric("PER 水準から見た目安", fmt(rep.per_fair_price if rep else None, ",.0f", " 円"),
           delta=fmt(rep.per_upside_pct, "+.1f", "%") if rep and rep.per_upside_pct is not None else None,
           help="過去の期末 PER の中央値 × 直近 EPS（予想があれば予想）")
 k4.metric("成長性（直近3期）", rep.growth_label if rep else "-",
           help=f"直近3期平均の 増収率＋増益率。{ir.GROWTH_HIGH:.0f}% 以上かつ両方プラスで「高成長」")
-verdict = label.split("・")[0]
+verdict = label.split("（")[0]
 k5.metric("総合評価", verdict, help=f"{label}（詳しくは「総合判断」タブ）")
 
 tab_sum, tab_theory, tab_ir = st.tabs(["🧭 総合判断", "💰 理論株価", "📊 業績・成長性（IR レポート）"])
@@ -170,10 +191,9 @@ with tab_sum:
     st.markdown("#### 判断の目安")
     rows = []
     if r is not None:
-        rows.append(["理論株価との比較（上昇余地）", fmt(r.upside_pct, ".1f", "%"), f"{core.UPSIDE_THRESHOLD}% 以上で割安",
-                     judge(r.upside_ok)])
-        rows.append(["自己資本比率", f"{inp.equity_ratio * 100:.1f}%", "50% 超で安全性が高い", judge(r.equity_ok)])
-        rows.append(["PSR", fmt(r.psr, ".2f", " 倍"), "1.0 倍未満で割安", judge(r.psr_ok)])
+        rows.append(["株価の理論株価からの乖離", fmt(r.gap_pct, "+.1f", "%"),
+                     f"−{core.UPSIDE_THRESHOLD}% 以下で割安圏、+{core.UPSIDE_THRESHOLD}% 以上で割高圏", r.verdict or "-"])
+        rows.append(["PBR", fmt(r.pbr, ".2f", " 倍"), "1.0 倍未満は株価が純資産を下回る", "-"])
     if rep is not None:
         per_judge = "-" if rep.per_upside_pct is None else (
             "割安" if rep.per_upside_pct >= 10 else "割高" if rep.per_upside_pct <= -10 else "同水準")
@@ -187,9 +207,9 @@ with tab_sum:
         rows.append(["EPS と株価の相関", fmt(corr, ".2f"), "0.7 以上で業績連動性が高い",
                      "-" if corr is None else ("高い" if corr >= 0.7 else "中程度" if corr >= 0.3 else "低い")])
     st.dataframe(pd.DataFrame(rows, columns=["観点", "値", "目安", "判定"]), hide_index=True, **STRETCH)
-    st.caption("理論株価は資産と現在の収益力、PER 水準は市場がこれまでつけてきた評価、成長性は今後の利益の伸びを見ています。"
-               "3 つがそろって割安を示すほど確度が高く、食い違うときは理由（一時的な減益、業態の変化など）を確認してください。"
-               "あくまで助言であり、投資は自己責任でお願いします。")
+    st.caption("理論株価は純資産と資本コストを上回る収益力、PER 水準は市場がこれまでつけてきた評価、成長性は今後の利益の伸びを見ています。"
+               "3 つがそろうほど確度が高く、食い違うときは理由（一時的な損益、業態の変化など）を確認してください。")
+    st.caption(f"⚠️ {core.DISCLAIMER}")
 
     if r is not None and rep is not None:
         st.download_button("📥 まとめて Excel（理論株価＋IR レポート）", type="primary",
@@ -203,39 +223,76 @@ with tab_theory:
     if inp is None:
         st.info(st.session_state.theory_error or "理論株価の計算に必要なデータがありません。")
     else:
-        for n in inp.notes:
+        for n in inp.notes + r.notes:
             st.caption(f"ℹ️ {n}")
+
+        st.markdown("#### 前提条件")
+        p1, p2, p3, p4 = st.columns(4)
+        p1.number_input("株主資本コスト r（%）", min_value=1.0, max_value=20.0, step=0.5, key="coe",
+                        help="株主が求める最低限の利回り。既定の 8% は伊藤レポート（経済産業省, 2014）が示した ROE の最低ライン")
+        p2.number_input("ROE が r に収れんする年数", min_value=1, max_value=30, step=1, key="years",
+                        help="今の ROE（超過利益）が競争で薄れ、r と同じになるまでの年数。長いほど理論株価は ROE の影響を強く受けます")
+        p3.number_input("配当性向（%）", min_value=0.0, max_value=100.0, step=5.0, key="payout",
+                        help="利益のうち配当に回す割合。残りは純資産に積み上がります。取得できない場合は 30% と仮定")
+        p4.selectbox("1年目の ROE", core.ROE_BASES, key="roe_basis",
+                     help="一時的な損益で ROE がぶれる銘柄は「過去3期平均 ROE」を選ぶと安定します")
         c1, c2 = st.columns(2)
-        c1.number_input("流動資産（百万円）", step=1.0, key="ca", help="0 のときは「時価総額/正味価値」を計算しません")
+        c1.number_input("流動資産（百万円）", step=1.0, key="ca", help="0 のときは「時価総額/正味流動資産」を計算しません")
         c2.text_input("データ元", value=inp.source, disabled=True)
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("資産価値", fmt(r.asset_value, ",.1f", " 円"), help="BPS × 割引評価率")
-        m2.metric("事業価値", fmt(r.business_value, ",.1f", " 円"), help=f"EPS × ROA × {core.ROE_ASSUMED_PER} × 財務レバレッジ補正")
-        m3.metric("時価総額", fmt(r.market_cap_million, ",.0f", " 百万円"))
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("BPS（純資産）", fmt(r.book_value, ",.1f", " 円"), help="1 株当たり純資産（直近実績）")
+        m2.metric("残余利益の現在価値", fmt(r.pv_residual_income, ",.1f", " 円"),
+                  help="資本コストを上回る（下回る）利益の合計を現在価値に割り引いたもの")
+        m3.metric("理論株価", fmt(r.theoretical_price, ",.0f", " 円"),
+                  help=f"株主資本コスト ±1% での幅：{fmt(r.price_low, ',.0f')}〜{fmt(r.price_high, ',.0f')} 円")
+        m4.metric("ROE（1年目）", fmt(r.roe_used * 100 if r.roe_used is not None else None, ".1f", "%"), help=r.roe_basis)
 
-        st.markdown("#### 指標と判定")
+        st.markdown("#### 株価との比較")
+        (st.success if r.recommend else st.error if r.recommend is False else st.info)(r.summary)
+
+        if r.sensitivity:
+            st.markdown("#### 前提を変えたときの理論株価（円）")
+            st.dataframe(pd.DataFrame(
+                [[f"{c * 100:.0f}%"] + [round(r.sensitivity[(c, y)]) if r.sensitivity[(c, y)] is not None else None
+                                        for y in core.SENS_YEARS] for c in core.SENS_COE],
+                columns=["株主資本コスト ＼ 収れん年数"] + [f"{y} 年" for y in core.SENS_YEARS]), hide_index=True, **STRETCH)
+            st.caption("理論株価は前提によって変わります。1 つの数字ではなく、この幅の中のどこに株価があるかを見てください。")
+
+        st.markdown("#### 参考指標")
         st.dataframe(pd.DataFrame({
-            "指標": ["① 自己資本比率", "② 上昇余地", "③ PSR", "④ 時価総額/正味価値"],
-            "値": [f"{inp.equity_ratio * 100:.1f}%", fmt(r.upside_pct, ".1f", "%"), fmt(r.psr, ".2f", " 倍"),
+            "指標": ["PBR", "PER", "PSR", "自己資本比率", "時価総額 ÷ 正味流動資産"],
+            "値": [fmt(r.pbr, ".2f", " 倍"), fmt(r.per, ".1f", " 倍"), fmt(r.psr, ".2f", " 倍"),
+                  fmt(inp.equity_ratio * 100 if inp.equity_ratio is not None else None, ".1f", "%"),
                   fmt(r.mc_to_net_value, ".2f", " 倍")],
-            "基準": ["50% 超", f"{core.UPSIDE_THRESHOLD}% 超", "1.0 倍未満", "1.0 倍未満"],
-            "判定": [judge(r.equity_ok), judge(r.upside_ok), judge(r.psr_ok), judge(r.mc_net_ok)],
+            "読み方": ["1 倍未満は株価が純資産を下回る（東証が改善を要請している水準）", "利益の何年分の株価か。業種平均と比べる",
+                     "売上高に対する株価水準", "高いほど財務の安全性が高い",
+                     "1 倍未満は清算価値より安い水準（Graham のネットネット）"],
         }), hide_index=True, **STRETCH)
 
-        st.markdown("#### 理論株価だけで見た投資判断")
-        (st.success if r.recommend else st.error if r.recommend is False else st.warning)(r.summary)
-
-        with st.expander("計算の内訳"):
+        with st.expander("計算の内訳と算定方法"):
             st.markdown(f"""
-- 割引評価率（自己資本比率から）: **{r.discount_rate}**
-- 資産価値 = BPS {inp.bps:,.2f} × {r.discount_rate} = **{r.asset_value:,.2f} 円**
-- 財務レバレッジ補正: **{r.leverage}**
-- 事業価値 = EPS {inp.eps:,.2f} × ROA {inp.roa:.4f} × {core.ROE_ASSUMED_PER} × {r.leverage} = **{r.business_value:,.2f} 円**
-- 理論株価 = 資産価値 + 事業価値 = **{r.theoretical_price:,.2f} 円**
-- 売上高: {fmt(r.sales_million, ",.0f", " 百万円")}／負債（総資産−純資産）: {fmt(r.liabilities_million, ",.0f", " 百万円")}／流動資産: {fmt(r.current_assets_million, ",.0f", " 百万円")}／正味価値: {fmt(r.net_value_million, ",.0f", " 百万円")}
+**理論株価 = BPS + Σ (ROE_t − r) × 期首 BPS_t ÷ (1 + r)^t**（残余利益モデル）
+
+- BPS（直近実績）: **{fmt(inp.bps, ",.2f", " 円")}**
+- 1年目の ROE: **{fmt(r.roe_used * 100 if r.roe_used is not None else None, ".2f", "%")}**（{r.roe_basis}）
+- 株主資本コスト r: **{r.cost_of_equity * 100:.1f}%**、収れん年数 T: **{r.years} 年**、配当性向: **{r.payout * 100:.1f}%**
+- ROE は T 年かけて r まで直線的に下がり、それ以降の超過利益は 0 と置いています（保守的な前提）。
+- 純資産は「利益 − 配当」だけ毎年増えると仮定しています（クリーンサープラス関係）。
 """)
-        st.download_button("📥 理論株価の Excel（StockPrice テンプレート）", data=core.build_excel(inp, r),
+            if r.ri_rows:
+                st.dataframe(pd.DataFrame([{
+                    "年": x["t"], "ROE": f"{x['roe'] * 100:.2f}%", "期首 BPS": round(x["book"], 2),
+                    "残余利益": round(x["ri"], 2), "割引係数": round(x["df"], 4), "現在価値": round(x["pv"], 2),
+                } for x in r.ri_rows]), hide_index=True, **STRETCH)
+            st.markdown("""
+**この手法を使う理由**：会計上の純資産と利益だけで企業価値を表せる理論式で（Ohlson 1995）、
+将来の大部分を見積もりに頼る DCF や配当割引モデルより、実際の株価をよく説明することが実証研究で示されています
+（Francis, Olsson & Oswald 2000 ほか）。日本公認会計士協会『企業価値評価ガイドライン』にもインカム・アプローチの一つ（残余利益法）として掲載されています。
+
+**出典**
+""" + "\n".join(f"- {s}" for s in core.METHOD_SOURCES))
+        st.download_button("📥 理論株価の Excel（計算式入り）", data=core.build_excel(inp, r),
                            file_name=core.excel_file_name(inp), mime=XLSX)
 
 # ============================================================
